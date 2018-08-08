@@ -1,48 +1,10 @@
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals
 
-import datetime
 import pytest
 import webob
 
 from h.search import Search, index, query
-
-
-class TestBuilder(object):
-    @pytest.mark.parametrize("sort_key,order,expected_order", [
-        # Sort supports "updated" and "created" fields.
-        ("updated", "desc", [1, 0, 2]),
-        ("updated", "asc", [2, 0, 1]),
-        ("created", "desc", [2, 0, 1]),
-        ("created", "asc", [1, 0, 2]),
-
-        # Default sort order should be descending.
-        ("updated", None, [1, 0, 2]),
-
-        # Default sort field should be "updated".
-        (None, "asc", [2, 0, 1]),
-    ])
-    def test_it_sorts_annotations(self, Annotation, search, sort_key, order, expected_order):
-        dt = datetime.datetime
-
-        # nb. Test annotations have a different ordering for updated vs created
-        # and creation order is different than updated/created asc/desc.
-        ann_ids = [Annotation(updated=dt(2017, 1, 1), created=dt(2017, 1, 1)).id,
-                   Annotation(updated=dt(2018, 1, 1), created=dt(2016, 1, 1)).id,
-                   Annotation(updated=dt(2016, 1, 1), created=dt(2018, 1, 1)).id]
-
-        params = {}
-        if sort_key:
-            params["sort"] = sort_key
-        if order:
-            params["order"] = order
-        result = search.run(params)
-
-        actual_order = [ann_ids.index(id_) for id_ in result.annotation_ids]
-        assert actual_order == expected_order
-
-    def test_it_ignores_unknown_sort_fields(self, search):
-        search.run({"sort": "no_such_field"})
 
 
 class TestTopLevelAnnotationsFilter(object):
@@ -57,7 +19,7 @@ class TestTopLevelAnnotationsFilter(object):
 
     @pytest.fixture
     def search(self, search):
-        search.append_filter(query.TopLevelAnnotationsFilter())
+        search.append_qualifier(query.TopLevelAnnotationsFilter())
         return search
 
 
@@ -75,7 +37,7 @@ class TestAuthorityFilter(object):
 
     @pytest.fixture
     def search(self, search):
-        search.append_filter(query.AuthorityFilter("auth1"))
+        search.append_qualifier(query.AuthorityFilter("auth1"))
         return search
 
 
@@ -121,7 +83,7 @@ class TestAuthFilter(object):
 
     @pytest.fixture
     def search(self, search, pyramid_request):
-        search.append_filter(query.AuthFilter(pyramid_request))
+        search.append_qualifier(query.AuthFilter(pyramid_request))
         return search
 
 
@@ -138,7 +100,7 @@ class TestGroupFilter(object):
 
     @pytest.fixture
     def search(self, search):
-        search.append_filter(query.GroupFilter())
+        search.append_qualifier(query.GroupFilter())
         return search
 
     @pytest.fixture
@@ -173,7 +135,7 @@ class TestGroupAuthFilter(object):
 
     @pytest.fixture
     def search(self, search, pyramid_request):
-        search.append_filter(query.GroupAuthFilter(pyramid_request))
+        search.append_qualifier(query.GroupAuthFilter(pyramid_request))
         return search
 
 
@@ -215,7 +177,7 @@ class TestUserFilter(object):
 
     @pytest.fixture
     def search(self, search):
-        search.append_filter(query.UserFilter())
+        search.append_qualifier(query.UserFilter())
         return search
 
 
@@ -294,7 +256,7 @@ class TestUriFilter(object):
 
     @pytest.fixture
     def search(self, search, pyramid_request):
-        search.append_filter(query.UriFilter(pyramid_request))
+        search.append_qualifier(query.UriFilter(pyramid_request))
         return search
 
     @pytest.fixture
@@ -304,13 +266,13 @@ class TestUriFilter(object):
 
 class TestDeletedFilter(object):
 
-    def test_excludes_deleted_annotations(self, search, Annotation):
+    def test_excludes_deleted_annotations(self, search, es_client, Annotation):
         deleted_ids = [Annotation(deleted=True).id]
         not_deleted_ids = [Annotation(deleted=False).id]
 
         # Deleted annotations need to be marked in the index using `h.search.index.delete`.
         for id_ in deleted_ids:
-            index.delete(search.es, id_, refresh=True)
+            index.delete(es_client, id_, refresh=True)
 
         result = search.run({})
 
@@ -318,7 +280,7 @@ class TestDeletedFilter(object):
 
     @pytest.fixture
     def search(self, search):
-        search.append_filter(query.DeletedFilter())
+        search.append_qualifier(query.DeletedFilter())
         return search
 
 
@@ -329,7 +291,7 @@ class TestNipsaFilter(object):
         self, pyramid_request, search, banned_user, user, Annotation
     ):
         pyramid_request.user = user
-        search.append_filter(query.NipsaFilter(pyramid_request))
+        search.append_qualifier(query.NipsaFilter(pyramid_request))
         Annotation(userid=banned_user.userid)
         expected_ids = [Annotation(userid=user.userid).id]
 
@@ -341,7 +303,7 @@ class TestNipsaFilter(object):
         self, pyramid_request, search, banned_user, user, Annotation
     ):
         pyramid_request.user = banned_user
-        search.append_filter(query.NipsaFilter(pyramid_request))
+        search.append_qualifier(query.NipsaFilter(pyramid_request))
         expected_ids = [Annotation(userid=banned_user.userid).id]
 
         result = search.run({})
@@ -354,7 +316,7 @@ class TestNipsaFilter(object):
     ):
         pyramid_request.user = user
         group_service.groupids_created_by.return_value = ["created_by_banneduser"]
-        search.append_filter(query.NipsaFilter(pyramid_request))
+        search.append_qualifier(query.NipsaFilter(pyramid_request))
         expected_ids = [Annotation(groupid="created_by_banneduser",
                                    userid=banned_user.userid).id]
 
@@ -449,7 +411,7 @@ class TestAnyMatcher(object):
 
     @pytest.fixture
     def search(self, search):
-        search.append_matcher(query.AnyMatcher())
+        search.append_qualifier(query.AnyMatcher())
         return search
 
     @pytest.fixture
@@ -507,7 +469,7 @@ class TestTagsMatcher(object):
 
     @pytest.fixture
     def search(self, search):
-        search.append_matcher(query.TagsMatcher())
+        search.append_qualifier(query.TagsMatcher())
         return search
 
 
@@ -528,7 +490,7 @@ class TestRepliesMatcher(object):
         expected_reply_ids = [reply1.id, reply2.id, reply3.id]
 
         ann_ids = [ann1.id, ann2.id]
-        search.append_matcher(query.RepliesMatcher(ann_ids))
+        search.append_qualifier(query.RepliesMatcher(ann_ids))
         result = search.run({})
 
         assert sorted(result.annotation_ids) == sorted(expected_reply_ids)
@@ -542,7 +504,7 @@ class TestRepliesMatcher(object):
         expected_reply_ids = [reply1.id, reply2.id]
 
         ann_ids = [ann1.id]
-        search.append_matcher(query.RepliesMatcher(ann_ids))
+        search.append_qualifier(query.RepliesMatcher(ann_ids))
         result = search.run({})
 
         assert sorted(result.annotation_ids) == sorted(expected_reply_ids)
@@ -622,12 +584,6 @@ class TestUsersAggregation(object):
         assert len(users_results) == bucket_limit
         assert count_pb == 3
         assert count_pc == 2
-
-
-@pytest.fixture
-def pyramid_request(request, pyramid_request, es_client):
-    pyramid_request.es = es_client
-    return pyramid_request
 
 
 @pytest.fixture
