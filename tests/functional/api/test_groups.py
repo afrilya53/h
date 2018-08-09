@@ -46,7 +46,7 @@ class TestCreateGroup(object):
 
     def test_it_allows_auth_client_with_forwarded_user(self, app, auth_client_header, user):
         headers = auth_client_header
-        headers['X-Forwarded-User'] = user.userid
+        headers[native_str('X-Forwarded-User')] = native_str(user.userid)
         group = {
             'name': 'My Group'
         }
