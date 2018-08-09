@@ -2,12 +2,13 @@
 
 from __future__ import unicode_literals
 import mock
+import elasticsearch_dsl
 import pytest
 from hypothesis import strategies as st
 from hypothesis import given
 from webob import multidict
 
-from h.search import query
+from h.search import Search, query
 
 ES_VERSION = (1, 7, 0)
 MISSING = object()
@@ -17,7 +18,7 @@ LIMIT_DEFAULT = 20
 LIMIT_MAX = 200
 
 
-class TestBuilder(object):
+class IndividualQualifiers(object):
     @pytest.mark.parametrize('offset,from_', [
         # defaults to OFFSET_DEFAULT
         (MISSING, OFFSET_DEFAULT),
@@ -34,118 +35,126 @@ class TestBuilder(object):
         ("-23",  OFFSET_DEFAULT),
         ("32.7", OFFSET_DEFAULT),
     ])
-    def test_offset(self, offset, from_):
-        builder = query.Builder(ES_VERSION)
-
+    def test_offset(self, offset, from_, search):
         if offset is MISSING:
-            q = builder.build({})
+            params = {}
         else:
-            q = builder.build({"offset": offset})
+            params = {"offset": offset}
+
+        search = query.Limiter()(search, params)
+        q = search.to_dict()
 
         assert q["from"] == from_
 
     @given(st.text())
     @pytest.mark.fuzz
-    def test_limit_output_within_bounds(self, text):
+    def test_limit_output_within_bounds(self, text, search):
         """Given any string input, output should be in the allowed range."""
-        builder = query.Builder(ES_VERSION)
+        params = {"limit": text}
 
-        q = builder.build({"limit": text})
+        search = query.Limiter()(search, params)
+        q = search.to_dict()
 
         assert isinstance(q["size"], int)
         assert 0 <= q["size"] <= LIMIT_MAX
 
     @given(st.integers())
     @pytest.mark.fuzz
-    def test_limit_output_within_bounds_int_input(self, lim):
+    def test_limit_output_within_bounds_int_input(self, lim, search):
         """Given any integer input, output should be in the allowed range."""
-        builder = query.Builder(ES_VERSION)
+        params = {"limit": str(lim)}
 
-        q = builder.build({"limit": str(lim)})
+        search = query.Limiter()(search, params)
+        q = search.to_dict()
 
         assert isinstance(q["size"], int)
         assert 0 <= q["size"] <= LIMIT_MAX
 
     @given(st.integers(min_value=0, max_value=LIMIT_MAX))
     @pytest.mark.fuzz
-    def test_limit_matches_input(self, lim):
+    def test_limit_matches_input(self, lim, search):
         """Given an integer in the allowed range, it should be passed through."""
-        builder = query.Builder(ES_VERSION)
+        params = {"limit": str(lim)}
 
-        q = builder.build({"limit": str(lim)})
+        search = query.Limiter()(search, params)
+        q = search.to_dict()
 
         assert q["size"] == lim
 
-    def test_limit_missing(self):
-        builder = query.Builder(ES_VERSION)
+    def test_limit_missing(self, search):
+        params = {}
 
-        q = builder.build({})
+        search = query.Limiter()(search, params)
+        q = search.to_dict()
 
         assert q["size"] == LIMIT_DEFAULT
 
-    def test_sort_is_by_updated(self):
+    def test_sort_is_by_updated(self, search):
         """Sort defaults to "updated"."""
-        builder = query.Builder(ES_VERSION)
+        params = {}
 
-        q = builder.build({})
+        search = query.Sorter()(search, params)
+        q = search.to_dict()
 
         sort = q["sort"]
         assert len(sort) == 1
         assert list(sort[0].keys()) == ["updated"]
 
-    def test_with_custom_sort(self):
+    def test_with_custom_sort(self, search):
         """Custom sorts are returned in the query dict."""
-        builder = query.Builder(ES_VERSION)
+        params = {"sort": "title"}
 
-        q = builder.build({"sort": "title"})
+        search = query.Sorter()(search, params)
+        q = search.to_dict()
 
         assert q["sort"] == [{'title': {'unmapped_type': 'boolean', 'order': 'desc'}}]
 
-    def test_order_defaults_to_desc(self):
+    def test_order_defaults_to_desc(self, search):
         """'order': "desc" is returned in the q dict by default."""
-        builder = query.Builder(ES_VERSION)
+        params = {}
 
-        q = builder.build({})
+        search = query.Sorter()(search, params)
+        q = search.to_dict()
 
         sort = q["sort"]
         assert sort[0]["updated"]["order"] == "desc"
 
-    def test_with_custom_order(self):
+    def test_with_custom_order(self, search):
         """'order' params are returned in the query dict if given."""
-        builder = query.Builder(ES_VERSION)
+        params = {"order": "asc"}
 
-        q = builder.build({"order": "asc"})
+        search = query.Sorter()(search, params)
+        q = search.to_dict()
 
         sort = q["sort"]
         assert sort[0]["updated"]["order"] == "asc"
 
-    def test_defaults_to_match_all(self):
+    def test_defaults_to_match_all(self, search):
         """If no query params are given a "match_all": {} query is returned."""
-        builder = query.Builder(ES_VERSION)
+        result = search.to_dict()
 
-        q = builder.build({})
+        assert result == {'query': {'match_all': {}}}
 
-        assert q["query"] == {'bool': {'filter': [], 'must': []}}
-
-    def test_default_param_action(self):
+    def test_default_param_action(self, search):
         """Other params are added as "match" clauses."""
-        builder = query.Builder(ES_VERSION)
+        params = {"foo": "bar"}
 
-        q = builder.build({"foo": "bar"})
+        search = query.KeyValueMatcher()(search, params)
+        q = search.to_dict()
 
         assert q["query"] == {
             'bool': {'filter': [],
                      'must': [{'match': {'foo': 'bar'}}]},
         }
 
-    def test_default_params_multidict(self):
+    def test_default_params_multidict(self, search):
         """Multiple params go into multiple "match" dicts."""
-        builder = query.Builder(ES_VERSION)
         params = multidict.MultiDict()
         params.add("user", "fred")
         params.add("user", "bob")
 
-        q = builder.build(params)
+        search = query.KeyValueMatcher()(search, params)
+        q = search.to_dict()
 
         assert q["query"] == {
             'bool': {'filter': [],
@@ -153,112 +162,81 @@ class TestBuilder(object):
                               {'match': {'user': 'bob'}}]},
         }
 
-    def test_with_evil_arguments(self):
-        builder = query.Builder(ES_VERSION)
+    def test_with_evil_arguments(self, search):
         params = {
             "offset": "3foo",
             "limit": '\' drop table annotations'
         }
 
-        q = builder.build(params)
+        search = query.Limiter()(search, params)
+        q = search.to_dict()
 
         assert q["from"] == 0
         assert q["size"] == 20
         assert q["query"] == {'bool': {'filter': [], 'must': []}}
 
-    def test_passes_params_to_filters(self):
-        testfilter = mock.Mock()
-        builder = query.Builder(ES_VERSION)
-        builder.append_filter(testfilter)
 
-        builder.build({"foo": "bar"})
+class TestSearch(object):
+    def test_passes_params_to_matchers(self, search):
+        testqualifier = mock.Mock()
+        testqualifier.side_effect = lambda search, params: search
+        search.append_qualifier(testqualifier)
 
-        testfilter.assert_called_with({"foo": "bar"})
+        search.run({"foo": "bar"})
 
-    def test_ignores_filters_returning_none(self):
-        testfilter = mock.Mock()
-        testfilter.return_value = None
-        builder = query.Builder(ES_VERSION)
-        builder.append_filter(testfilter)
+        testqualifier.assert_called_with(mock.ANY, {"foo": "bar"})
 
-        q = builder.build({})
+    def test_adds_qualifiers_to_query(self, search):
+        testqualifier = mock.Mock()
 
-        assert q["query"] == {'bool': {'filter': [], 'must': []}}
+        search.append_qualifier(testqualifier)
 
-    def test_filters_query_by_filter_results(self):
-        testfilter = mock.Mock()
-        testfilter.return_value = {"term": {"giraffe": "nose"}}
-        builder = query.Builder(ES_VERSION)
-        builder.append_filter(testfilter)
+        assert testqualifier in search._qualifiers
 
-        q = builder.build({})
-        assert q["query"] == {
-            'bool': {'filter': [{'term': {'giraffe': 'nose'}}],
-                     'must': []},
-        }
-
-    def test_passes_params_to_matchers(self):
-        testmatcher = mock.Mock()
-        builder = query.Builder(ES_VERSION)
-        builder.append_matcher(testmatcher)
-
-        builder.build({"foo": "bar"})
-
-        testmatcher.assert_called_with({"foo": "bar"})
-
-    def test_adds_matchers_to_query(self):
-        testmatcher = mock.Mock()
-        testmatcher.return_value = {"match": {"giraffe": "nose"}}
-        builder = query.Builder(ES_VERSION)
-        builder.append_matcher(testmatcher)
-
-        q = builder.build({})
-
-        assert q["query"] == {
-            'bool': {'filter': [],
-                     'must': [{'match': {'giraffe': 'nose'}}]},
-        }
-
-    def test_passes_params_to_aggregations(self):
+    def test_passes_params_to_aggregations(self, search):
         testaggregation = mock.Mock()
-        builder = query.Builder(ES_VERSION)
-        builder.append_aggregation(testaggregation)
+        testaggregation.side_effect = lambda search, params: search
+        search.append_aggregation(testaggregation)
 
-        builder.build({"foo": "bar"})
+        search.run({"foo": "bar"})
 
-        testaggregation.assert_called_with({"foo": "bar"})
+        testaggregation.assert_called_with(mock.ANY, {"foo": "bar"})
 
-    def test_adds_aggregations_to_query(self):
+    def test_adds_aggregations_to_query(self, search):
         testaggregation = mock.Mock(key="foobar")
-        # testaggregation.key.return_value = "foobar"
-        testaggregation.return_value = {"terms": {"field": "foo"}}
-        builder = query.Builder(ES_VERSION)
-        builder.append_aggregation(testaggregation)
 
-        q = builder.build({})
+        search.append_aggregation(testaggregation)
 
-        assert q["aggs"] == {
-            "foobar": {"terms": {"field": "foo"}}
-        }
+        assert testaggregation in search._aggregations
+
+    @pytest.fixture
+    def search(self, pyramid_request):
+        search = Search(pyramid_request)
+        # Remove all default filters, aggregators, and matchers.
+        search.clear()
+        return search
 
 
-def test_authority_filter_adds_authority_term():
-    filter_ = query.AuthorityFilter(authority='partner.org')
-    assert filter_({}) == {'term': {'authority': 'partner.org'}}
+def test_authority_filter_adds_authority_term(search):
+    search = query.AuthorityFilter(authority='partner.org')(search, {})
+    result = search.to_dict()["query"]["bool"]["filter"][0]
+    assert result == {'term': {'authority': 'partner.org'}}
 
 
 class TestAuthFilter(object):
-    def test_unauthenticated(self):
+    def test_unauthenticated(self, search):
         request = mock.Mock(authenticated_userid=None)
-        authfilter = query.AuthFilter(request)
+        search = query.AuthFilter(request)(search, {})
+        result = search.to_dict()["query"]["bool"]["filter"][0]
 
-        assert authfilter({}) == {'term': {'shared': True}}
+        assert result == {'term': {'shared': True}}
 
-    def test_authenticated(self):
+    def test_authenticated(self, search):
         request = mock.Mock(authenticated_userid='acct:doe@example.org')
-        authfilter = query.AuthFilter(request)
+        search = query.AuthFilter(request)(search, {})
+        result = search.to_dict()["query"]["bool"]["filter"][0]
 
-        assert authfilter({}) == {
+        assert result == {
             'bool': {
                 'should': [
                     {'term': {'shared': True}},
@@ -269,55 +247,58 @@ class TestAuthFilter(object):
 
 
 class TestGroupFilter(object):
-    def test_term_filters_for_group(self):
-        groupfilter = query.GroupFilter()
-
-        assert groupfilter({"group": "wibble"}) == {"term": {"group": "wibble"}}
-
-    def test_strips_param(self):
-        groupfilter = query.GroupFilter()
+    def test_term_filters_for_group(self, search):
         params = {"group": "wibble"}
+        search = query.GroupFilter()(search, params)
+        result = search.to_dict()["query"]["bool"]["filter"][0]
 
-        groupfilter(params)
+        assert result == {"term": {"group": "wibble"}}
+
+    def test_strips_param(self, search):
+        params = {"group": "wibble"}
+        search = query.GroupFilter()(search, params)
 
         assert params == {}
 
-    def test_returns_none_when_no_param(self):
-        groupfilter = query.GroupFilter()
+    def test_returns_none_when_no_param(self, search):
+        search = query.GroupFilter()(search, {})
+        result = search.to_dict()
 
-        assert groupfilter({}) is None
+        assert result == {'query': {'match_all': {}}}
 
 
 class TestGroupAuthFilter(object):
-    def test_fetches_readable_groups(self, pyramid_request, group_service):
+    def test_fetches_readable_groups(self, pyramid_request, group_service, search):
         pyramid_request.user = mock.sentinel.user
 
-        filter_ = query.GroupAuthFilter(pyramid_request)
-        filter_({})
+        search = query.GroupAuthFilter(pyramid_request)(search, {})
 
         group_service.groupids_readable_by.assert_called_once_with(mock.sentinel.user)
 
-    def test_returns_terms_filter(self, pyramid_request, group_service):
+    def test_returns_terms_filter(self, pyramid_request, group_service, search):
         group_service.groupids_readable_by.return_value = ['group-a', 'group-b']
 
-        filter_ = query.GroupAuthFilter(pyramid_request)
-        result = filter_({})
+        search = query.GroupAuthFilter(pyramid_request)(search, {})
+        result = search.to_dict()["query"]["bool"]["filter"][0]
 
         assert result == {'terms': {'group': ['group-a', 'group-b']}}
 
 
 class TestUriFilter(object):
     @pytest.mark.usefixtures('uri')
-    def test_inactive_when_no_uri_param(self):
+    def test_inactive_when_no_uri_param(self, search):
         """
         When there's no `uri` parameter, return None.
         """
         request = mock.Mock()
-        urifilter = query.UriFilter(request)
+        params = {}
 
-        assert urifilter({"foo": "bar"}) is None
+        search = query.UriFilter(request)(search, params)
+        result = search.to_dict()
 
-    def test_expands_and_normalizes_into_terms_filter(self, storage):
+        assert result == {'query': {'match_all': {}}}
+
+    def test_expands_and_normalizes_into_terms_filter(self, storage, search):
         """
         Uses a `terms` filter against target.scope to filter for URI.
 
@@ -328,21 +309,21 @@ class TestUriFilter(object):
         of the expansion.
         """
         request = mock.Mock()
+        params = {"uri": "http://example.com/"}
         storage.expand_uri.side_effect = lambda _, x: [
             "http://giraffes.com/",
             "https://elephants.com/",
         ]
 
-        urifilter = query.UriFilter(request)
-
-        result = urifilter({"uri": "http://example.com/"})
+        search = query.UriFilter(request)(search, params)
+        result = search.to_dict()["query"]["bool"]["filter"][0]
         query_uris = result["terms"]["target.scope"]
 
         storage.expand_uri.assert_called_with(request.db, "http://example.com/")
         assert sorted(query_uris) == sorted(["httpx://giraffes.com",
                                              "httpx://elephants.com"])
 
-    def test_queries_multiple_uris(self, storage):
+    def test_queries_multiple_uris(self, storage, search):
         """
         Uses a `terms` filter against target.scope to filter for URI.
 
@@ -358,9 +339,9 @@ class TestUriFilter(object):
             ["http://tigers.com/", "https://elephants.com/"],
         ]
 
-        urifilter = query.UriFilter(request)
+        search = query.UriFilter(request)(search, params)
+        result = search.to_dict()["query"]["bool"]["filter"][0]
 
-        result = urifilter(params)
         query_uris = result["terms"]["target.scope"]
 
         storage.expand_uri.assert_any_call(request.db, "http://example.com")
@@ -369,7 +350,7 @@ class TestUriFilter(object):
                                              "httpx://elephants.com",
                                              "httpx://tigers.com"])
 
-    def test_accepts_url_aliases(self, storage):
+    def test_accepts_url_aliases(self, storage, search):
         request = mock.Mock()
         params = multidict.MultiDict()
         params.add("uri", "http://example.com")
@@ -379,9 +360,9 @@ class TestUriFilter(object):
             ["http://tigers.com/", "https://elephants.com/"],
         ]
 
-        urifilter = query.UriFilter(request)
+        search = query.UriFilter(request)(search, params)
+        result = search.to_dict()["query"]["bool"]["filter"][0]
 
-        result = urifilter(params)
         query_uris = result["terms"]["target.scope"]
 
         storage.expand_uri.assert_any_call(request.db, "http://example.com")
@@ -404,57 +385,63 @@ class TestUriFilter(object):
 
 
 class TestUserFilter(object):
-    def test_term_filters_for_user(self):
-        userfilter = query.UserFilter()
+    def test_term_filters_for_user(self, search):
+        params = {"user": "luke"}
+        search = query.UserFilter()(search, params)
+        result = search.to_dict()["query"]["bool"]["filter"][0]
 
-        assert userfilter({"user": "luke"}) == {"terms": {"user": ["luke"]}}
+        assert result == {"terms": {"user": ["luke"]}}
 
-    def test_supports_filtering_for_multiple_users(self):
-        userfilter = query.UserFilter()
-
+    def test_supports_filtering_for_multiple_users(self, search):
         params = multidict.MultiDict()
         params.add("user", "alice")
         params.add("user", "luke")
 
-        assert userfilter(params) == {
+        search = query.UserFilter()(search, params)
+        result = search.to_dict()["query"]["bool"]["filter"][0]
+
+        assert result == {
             "terms": {
                 "user": ["alice", "luke"]
             }
         }
 
-    def test_lowercases_value(self):
-        userfilter = query.UserFilter()
+    def test_lowercases_value(self, search):
+        params = {"user": "LUkE"}
+        search = query.UserFilter()(search, params)
+        result = search.to_dict()["query"]["bool"]["filter"][0]
 
-        assert userfilter({"user": "LUkE"}) == {"terms": {"user": ["luke"]}}
+        assert result == {"terms": {"user": ["luke"]}}
 
-    def test_strips_param(self):
-        userfilter = query.UserFilter()
+    def test_strips_param(self, search):
         params = {"user": "luke"}
-
-        userfilter(params)
+        search = query.UserFilter()(search, params)
 
         assert params == {}
 
-    def test_returns_none_when_no_param(self):
-        userfilter = query.UserFilter()
+    def test_returns_none_when_no_param(self, search):
+        params = {}
+        search = query.UserFilter()(search, params)
+        result = search.to_dict()
 
-        assert userfilter({}) is None
+        assert result == {'query': {'match_all': {}}}
 
 
 class TestDeletedFilter(object):
-    def test_filter(self):
-        deletedfilter = query.DeletedFilter()
+    def test_filter(self, search):
+        search = query.DeletedFilter()(search, {})
+        result = search.to_dict()["query"]["bool"]["filter"][0]
 
-        assert deletedfilter({}) == {
-            "bool": {"must_not": {"exists": {"field": "deleted"}}}
+        assert result == {
+            "bool": {"must_not": [{"exists": {"field": "deleted"}}]}
         }
 
 
 class TestAnyMatcher():
-    def test_any_query(self):
-        anymatcher = query.AnyMatcher()
-
-        result = anymatcher({"any": "foo"})
+    def test_any_query(self, search):
+        params = {"any": "foo"}
+        search = query.AnyMatcher()(search, params)
+        result = search.to_dict()["query"]
 
         assert result == {
             "simple_query_string": {
@@ -463,14 +450,14 @@ class TestAnyMatcher():
             }
         }
 
-    def test_multiple_params(self):
+    def test_multiple_params(self, search):
         """Multiple keywords at once are handled correctly."""
-        anymatcher = query.AnyMatcher()
         params = multidict.MultiDict()
         params.add("any", "howdy")
         params.add("any", "there")
 
-        result = anymatcher(params)
+        search = query.AnyMatcher()(search, params)
+        result = search.to_dict()["query"]
 
         assert result == {
             "simple_query_string": {
@@ -479,7 +466,9 @@ class TestAnyMatcher():
             }
         }
 
-    def test_aliases_tag_to_tags(self):
+
+class TestTagsMatcher():
+    def test_aliases_tag_to_tags(self, search):
         """'tag' params should be transformed into 'tags' queries.
 
         'tag' is aliased to 'tags' because users often type tag instead of tags.
@@ -489,7 +478,8 @@ class TestAnyMatcher():
         params.add('tag', 'foo')
         params.add('tag', 'bar')
 
-        result = query.TagsMatcher()(params)
+        search = query.TagsMatcher()(search, params)
+        result = search.to_dict()["query"]
 
         assert list(result.keys()) == ['bool']
         assert list(result['bool'].keys()) == ['must']
@@ -497,11 +487,12 @@ class TestAnyMatcher():
         assert {'match': {'tags': {'query': 'foo', 'operator': 'and'}}} in result['bool']['must']
         assert {'match': {'tags': {'query': 'bar', 'operator': 'and'}}} in result['bool']['must']
 
-    def test_with_both_tag_and_tags(self):
+    def test_with_both_tag_and_tags(self, search):
         """If both 'tag' and 'tags' params are used they should all become tags."""
         params = {'tag': 'foo', 'tags': 'bar'}
 
-        result = query.TagsMatcher()(params)
+        search = query.TagsMatcher()(search, params)
+        result = search.to_dict()["query"]
 
         assert list(result.keys()) == ['bool']
         assert list(result['bool'].keys()) == ['must']
@@ -512,27 +503,31 @@ class TestAnyMatcher():
 
 class TestTagsAggregations(object):
     def test_key_is_tags(self):
-        assert query.TagsAggregation().key == 'tags'
+        assert query.TagsAggregation().name == 'tags'
 
-    def test_elasticsearch_aggregation(self):
-        agg = query.TagsAggregation()
-        assert agg({}) == {
+    def test_elasticsearch_aggregation(self, search):
+        query.TagsAggregation()(search, {})
+        agg = search.to_dict()["aggs"]["tags"]
+        assert agg == {
             'terms': {'field': 'tags_raw', 'size': 10}
         }
 
-    def test_it_allows_to_set_a_limit(self):
-        agg = query.TagsAggregation(limit=14)
-        assert agg({}) == {
+    def test_it_allows_to_set_a_limit(self, search):
+        query.TagsAggregation(limit=14)(search, {})
+        agg = search.to_dict()["aggs"]["tags"]
+        assert agg == {
             'terms': {'field': 'tags_raw', 'size': 14}
         }
 
     def test_parse_result(self):
         agg = query.TagsAggregation()
         elasticsearch_result = {
-            'buckets': [
-                {'key': 'tag-4', 'doc_count': 42},
-                {'key': 'tag-2', 'doc_count': 28},
-            ]
+            "tags": {
+                'buckets': [
+                    {'key': 'tag-4', 'doc_count': 42},
+                    {'key': 'tag-2', 'doc_count': 28},
+                ]
+            }
         }
 
         assert agg.parse_result(elasticsearch_result) == [
@@ -543,27 +538,31 @@ class TestTagsAggregations(object):
 
 class TestUsersAggregation(object):
     def test_key_is_users(self):
-        assert query.UsersAggregation().key == 'users'
+        assert query.UsersAggregation().name == 'users'
 
-    def test_elasticsearch_aggregation(self):
-        agg = query.UsersAggregation()
-        assert agg({}) == {
+    def test_elasticsearch_aggregation(self, search):
+        query.UsersAggregation()(search, {})
+        agg = search.to_dict()["aggs"]["users"]
+        assert agg == {
             'terms': {'field': 'user_raw', 'size': 10}
         }
 
-    def test_it_allows_to_set_a_limit(self):
-        agg = query.UsersAggregation(limit=14)
-        assert agg({}) == {
+    def test_it_allows_to_set_a_limit(self, search):
+        query.UsersAggregation(limit=14)(search, {})
+        agg = search.to_dict()["aggs"]["users"]
+        assert agg == {
             'terms': {'field': 'user_raw', 'size': 14}
         }
 
     def test_parse_result(self):
         agg = query.UsersAggregation()
         elasticsearch_result = {
-            'buckets': [
-                {'key': 'alice', 'doc_count': 42},
-                {'key': 'luke', 'doc_count': 28},
-            ]
+            'users': {
+                'buckets': [
+                    {'key': 'alice', 'doc_count': 42},
+                    {'key': 'luke', 'doc_count': 28},
+                ]
+            }
         }
 
         assert agg.parse_result(elasticsearch_result) == [
@@ -572,66 +571,60 @@ class TestUsersAggregation(object):
         ]
 
 
-class TestNipsaFilter(object):
-    def test_call_returns_nipsa_filter(self, pyramid_request, nipsa_filter):
-        f = query.NipsaFilter(pyramid_request)
-
-        assert f({}) == nipsa_filter.return_value
-
-    def test_call_passes_group_service(self, pyramid_request, nipsa_filter, group_service):
-        f = query.NipsaFilter(pyramid_request)
-
-        f({})
-
-        nipsa_filter.assert_called_once_with(group_service, mock.ANY)
-
-    def test_call_passes_request_user(self, pyramid_request, nipsa_filter):
-        f = query.NipsaFilter(pyramid_request)
-
-        f({})
-
-        nipsa_filter.assert_called_once_with(mock.ANY, pyramid_request.user)
-
-    @pytest.fixture
-    def nipsa_filter(self, patch):
-        return patch('h.search.query.nipsa_filter')
-
-
-def test_nipsa_filter_filters_out_nipsad_annotations(group_service):
+def test_nipsa_filter_filters_out_nipsad_annotations(group_service, pyramid_request, search):
     """nipsa_filter() filters out annotations with "nipsa": True."""
-    assert query.nipsa_filter(group_service) == {
+    pyramid_request.user = None
+    search = query.NipsaFilter(pyramid_request)(search, {})
+    filter_ = search.to_dict()["query"]["bool"]["filter"][0]
+    assert filter_ == {
         "bool": {
             "should": [
-                {'bool': {'must_not': {'term': {'nipsa': True}}}},
+                {'bool': {'must_not': [{'term': {'nipsa': True}}]}},
                 {'exists': {'field': 'thread_ids'}},
             ]
         }
     }
 
 
-def test_nipsa_filter_users_own_annotations_are_not_filtered(group_service, user):
-    filter_ = query.nipsa_filter(group_service, user)
+def test_nipsa_filter_users_own_annotations_are_not_filtered(group_service, pyramid_request, search):
+    search = query.NipsaFilter(pyramid_request)(search, {})
+    filter_ = search.to_dict()["query"]["bool"]["filter"][0]
 
     assert {'term': {'user': 'fred'}} in (
         filter_["bool"]["should"])
 
 
-def test_nipsa_filter_coerces_userid_to_lowercase(group_service, user):
+def test_nipsa_filter_coerces_userid_to_lowercase(group_service, pyramid_request, user, search):
     user.userid = 'DonkeyNose'
 
-    filter_ = query.nipsa_filter(group_service, user)
+    search = query.NipsaFilter(pyramid_request)(search, {})
+    filter_ = search.to_dict()["query"]["bool"]["filter"][0]
 
     assert {'term': {'user': 'donkeynose'}} in (
         filter_["bool"]["should"])
 
 
-def test_nipsa_filter_group_annotations_not_filtered_for_creator(group_service, user):
+def test_nipsa_filter_group_annotations_not_filtered_for_creator(group_service, pyramid_request, search):
     group_service.groupids_created_by.return_value = ['pubid-1', 'pubid-4', 'pubid-3']
-
-    filter_ = query.nipsa_filter(group_service, user)
+    search = query.NipsaFilter(pyramid_request)(search, {})
+    filter_ = search.to_dict()["query"]["bool"]["filter"][0]
 
     assert {'terms': {'group': ['pubid-1', 'pubid-4', 'pubid-3']}} in (
         filter_['bool']['should'])
+
+
+@pytest.fixture
+def search(pyramid_request, es_client):
+    search = elasticsearch_dsl.Search(
+            using=es_client.conn, index=pyramid_request.es.index
+    )
+    return search
+
+
+@pytest.fixture
+def pyramid_request(pyramid_request, user):
+    pyramid_request.user = user
+    return pyramid_request
 
 
 @pytest.fixture
