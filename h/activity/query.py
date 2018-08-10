@@ -165,8 +165,8 @@ def fetch_annotations(session, ids):
 @newrelic.agent.function_trace()
 def _execute_search(request, query, page_size):
     search = Search(request, stats=request.stats)
-    search.append_filter(AuthorityFilter(authority=request.authority))
-    search.append_filter(TopLevelAnnotationsFilter())
+    search.append_qualifier(AuthorityFilter(authority=request.authority))
+    search.append_qualifier(TopLevelAnnotationsFilter())
     for agg in aggregations_for(query):
         search.append_aggregation(agg)
 
